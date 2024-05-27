@@ -504,6 +504,8 @@ function get_client_usage(){
 					get_client_Upload_bytes=$(echo "$client_info" | cut -d'-' -f2 | sort -u | head -n1)
 					get_client_Download_bytes=$(echo "$client_info" | cut -d'-' -f3 | sort -u | head -n1)
 				fi
+			else
+				continue
 			fi
 
 			[ -z "$get_client_usage_bytes" ] && get_client_usage_bytes="0"
