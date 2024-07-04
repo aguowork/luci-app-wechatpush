@@ -8,7 +8,6 @@ return view.extend({
         return L.resolveDefault(fs.exec_direct('/usr/libexec/wechatpush-call', ['get_client'], 'json'), { devices: [] });
     },
     render: function (data) {
-
         var devices = data.devices;
         var totalDevices = devices.length;
         var headers = [_('Hostname'), _('IPv4 address'), _('MAC address'), _('Interfaces'), _('Online time'), _('Details')];
@@ -16,11 +15,10 @@ return view.extend({
         var visibleColumns = [];
         var hasData = false;
 
-        // Set default sorting column and direction
+        // 将 IP 列设置为默认排序列
         var defaultSortColumn = 'ip';
         var defaultSortDirection = 'asc';
 
-        // Sort devices array by default column and direction
         devices.sort(function (a, b) {
             var value1 = ipToNumber(a[defaultSortColumn]);
             var value2 = ipToNumber(b[defaultSortColumn]);
@@ -33,7 +31,7 @@ return view.extend({
             return 0;
         });
 
-        // Determine visible columns based on data availability        
+        // 根据数据源决定可见列     
         for (var i = 0; i < columns.length; i++) {
             var column = columns[i];
             var hasColumnData = false;
@@ -150,7 +148,20 @@ return view.extend({
                 for (var i = 0; i < columns.length; i++) {
                     if (visibleColumns.includes(i)) {
                         var cell = document.createElement('td');
-                        cell.textContent = device[columns[i]];
+                        if (columns[i] === 'uptime') {
+                            cell.textContent = calculateUptime(device['uptime']);
+                            poll.add(L.bind(function () {
+                                cell.textContent = calculateUptime(device['uptime']);
+                            }));
+                        } else if (columns[i] === 'ip' && device['http_access']) {
+                            var link = document.createElement('a');
+                            link.href = `${device['http_access']}://${device['ip']}`;
+                            link.textContent = device['ip'];
+                            link.target = '_blank';
+                            cell.appendChild(link);
+                        } else {
+                            cell.textContent = device[columns[i]];
+                        }
                         row.appendChild(cell);
                     }
                 }
@@ -160,6 +171,62 @@ return view.extend({
             table.appendChild(tbody);
 
             return table;
+        }
+
+        function calculateUptime(uptime) {
+            // 将时间戳转换为时间格式
+            var startTimeStamp = parseInt(uptime);
+            var currentTimeStamp = Math.floor(Date.now() / 1000);
+            var uptimeInSeconds = currentTimeStamp - startTimeStamp;
+
+            var days = Math.floor(uptimeInSeconds / (3600 * 24));
+            var hours = Math.floor((uptimeInSeconds % (3600 * 24)) / 3600);
+            var minutes = Math.floor((uptimeInSeconds % 3600) / 60);
+            var seconds = uptimeInSeconds % 60;
+
+            if (days > 0) {
+                return days + ' 天 ' + hours + ' 小时';
+            } else if (hours > 0) {
+                return hours + ' 小时 ' + minutes + ' 分钟';
+            } else if (minutes > 0) {
+                return minutes + ' 分钟 ' + seconds + ' 秒';
+            } else {
+                return seconds + ' 秒';
+            }
+        }
+
+        function calculateUptimeInSeconds(uptime) {
+            // 转换时间格式以排序
+            var parts = uptime.split(' ');
+            var totalSeconds = 0;
+
+            for (var i = 0; i < parts.length; i += 2) {
+                var value = parseInt(parts[i]);
+                var unit = parts[i + 1];
+
+                if (unit === '天') {
+                    totalSeconds += value * 24 * 3600;
+                } else if (unit === '小时') {
+                    totalSeconds += value * 3600;
+                } else if (unit === '分钟') {
+                    totalSeconds += value * 60;
+                } else if (unit === '秒') {
+                    totalSeconds += value;
+                }
+            }
+
+            return totalSeconds;
+        }
+
+        function ipToNumber(ipAddress) {
+            var parts = ipAddress.split('.');
+            var number = 0;
+
+            for (var i = 0; i < parts.length; i++) {
+                number = number * 256 + parseInt(parts[i]);
+            }
+
+            return number;
         }
 
         var container = document.createElement('div');
@@ -189,10 +256,12 @@ return view.extend({
             }
 
             rows.sort(function (row1, row2) {
-                var value1 = row1.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent.toLowerCase();
-                var value2 = row2.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent.toLowerCase();
-
-                if (column === 'ip') {
+                var value1 = row1.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent;
+                var value2 = row2.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent;
+                if (column === 'uptime') {
+                    value1 = calculateUptimeInSeconds(row1.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent);
+                    value2 = calculateUptimeInSeconds(row2.querySelector('td:nth-of-type(' + (visibleColumns.indexOf(columns.indexOf(column)) + 1) + ')').textContent);
+                } else if (column === 'ip') {
                     value1 = ipToNumber(value1);
                     value2 = ipToNumber(value2);
                 }
@@ -219,17 +288,6 @@ return view.extend({
                 table.classList.add('sorted', 'desc');
             }
             table.dataset.sortColumn = column;
-        }
-
-        function ipToNumber(ipAddress) {
-            var parts = ipAddress.split('.');
-            var number = 0;
-
-            for (var i = 0; i < parts.length; i++) {
-                number = number * 256 + parseInt(parts[i]);
-            }
-
-            return number;
         }
 
         return container;
