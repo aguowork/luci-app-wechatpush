@@ -302,7 +302,7 @@ return view.extend({
             localStorage.setItem('sortDirection', currentSortDirection);
 
             container.innerHTML = '';
-            container.appendChild(document.createElement('h2')).textContent = _('当前共 ') + totalDevices + _(' 台设备在线');
+            container.appendChild(document.createElement('h2')).textContent = _('当前共 ') + totalDevices + _(' MAC在线');
             container.appendChild(createTable());
             container.appendChild(document.createElement('style')).textContent = style;
         }
