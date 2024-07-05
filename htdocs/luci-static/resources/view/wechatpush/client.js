@@ -2,6 +2,7 @@
 'require view';
 'require fs';
 'require ui';
+'require poll';
 
 return view.extend({
     load: function () {
@@ -14,7 +15,6 @@ return view.extend({
         });
     },
 
-    
     fetchAndRenderDevices: function () {
         var self = this;
         return this.fetchDevices().then(function (data) {
@@ -38,7 +38,6 @@ return view.extend({
             });
         });
     },
-
 
     render: function (data) {
         if (!data || !data.devices || !Array.isArray(data.devices)) {
@@ -64,8 +63,8 @@ return view.extend({
         var currentSortDirection = storedSortDirection || defaultSortDirection;
 
         devices.sort(function (a, b) {
-            var value1 = ipToNumber(a[defaultSortColumn]);
-            var value2 = ipToNumber(b[defaultSortColumn]);
+            var value1 = getValueForSorting(a, currentSortColumn);
+            var value2 = getValueForSorting(b, currentSortColumn);
 
             if (value1 < value2) {
                 return currentSortDirection === 'asc' ? -1 : 1;
@@ -75,7 +74,7 @@ return view.extend({
             return 0;
         });
 
-        // 根据数据源决定可见列     
+        // 根据数据源决定可见列
         for (var i = 0; i < columns.length; i++) {
             var column = columns[i];
             var hasColumnData = false;
@@ -246,6 +245,7 @@ return view.extend({
                 return parseInt(device['uptime']);
             } else if (column === 'ip') {
                 return ipToNumber(value);
+            }
             return value;
         }
 
@@ -261,7 +261,7 @@ return view.extend({
         }
 
         var container = document.createElement('div');
-        container.appendChild(document.createElement('h2')).textContent = _('当前共 ') + totalDevices + _(' MAC在线');
+        container.appendChild(document.createElement('h2')).textContent = _('当前共 ') + totalDevices + _(' 台设备在线');
         container.appendChild(createTable());
         container.appendChild(document.createElement('style')).textContent = style;
 
@@ -309,7 +309,7 @@ return view.extend({
 
         return container;
     },
-    
+
     setupAutoRefresh: function () {
         var self = this;
         poll.add(L.bind(function () {
