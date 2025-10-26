@@ -123,6 +123,57 @@ read_config() {
 	cron
 }
 
+find_Dbm_final() {
+    local mac="$1"
+    local wxjk_dbm
+    local device
+    
+    # 参数检查（完全静默）
+    [ -z "$mac" ] && return 1
+    # 验证MAC地址格式（完全静默）
+    echo "$mac" | grep -qE "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$" || return 1
+    
+    
+    # 遍历所有网络接口
+    for device in /sys/class/net/*; do
+        device=$(basename "$device")
+        # 检查是否是无线接口且可用
+        if [ -d "/sys/class/net/$device/wireless" ] && \
+           iwinfo "$device" info >/dev/null 2>&1; then
+            local clients=$(iwinfo "$device" assoclist 2>/dev/null)
+            [ -z "$clients" ] && continue
+            wxjk_dbm=$(echo "$clients" | awk -v mac="$mac" '
+			BEGIN { IGNORECASE=1 }
+			index(tolower($0), tolower(mac)) {
+				l = tolower($0)
+				if (match(l, /-?[0-9]+[[:space:]]*dbm/)) {
+				val = substr(l, RSTART, RLENGTH)
+				gsub(/[[:space:]]*dbm/, "", val)
+				print val
+				} else {
+				print "__SEEN__"
+				}
+				exit
+			}')
+            if [ "$wxjk_dbm" = "__SEEN__" ]; then
+                # 命中 MAC 但未解析到 dBm，命中即早停
+                echo ""
+                return 1
+            elif [ -n "$wxjk_dbm" ]; then
+				# 输出 dBm 数值（去除多余空白后返回）
+                echo "$wxjk_dbm" | awk '{ $1=$1 };1'
+                return 0
+            else
+                # 本接口未命中该 MAC，继续下一接口
+                continue
+            fi
+        fi
+    done
+    
+    echo ""
+    return 1
+}
+
 # 初始化
 init() {
 	# 检测程序开关
@@ -968,9 +1019,25 @@ usage() {
 	elif [ $1 == "get" ]; then
 		[ ! -f "${dir}/usage.db" ] && [ -z "$3" ] && echo $(bytes_for_humans "0") && return
 		[ ! -f "${dir}/usage.db" ] && [ -n "$3" ] && echo "0" && return
-		[ -z "$total_n" ] && total_n=$(cat ${dir}/usage.db | head -n1 | grep "total" | sed 's/,/\n/g' | awk '/total/{print NR}') 2>/dev/null
+		# 计算各列序号，默认取 total 列；支持第 4 参数指定 in/out/total
+		[ -z "$total_n" ] && total_n=$(cat ${dir}/usage.db | head -n1 | sed 's/,/\n/g' | awk '$0=="total"{print NR}') 2>/dev/null
+		[ -z "$in_n" ] && in_n=$(cat ${dir}/usage.db | head -n1 | sed 's/,/\n/g' | awk '$0=="in"{print NR}') 2>/dev/null
+		[ -z "$out_n" ] && out_n=$(cat ${dir}/usage.db | head -n1 | sed 's/,/\n/g' | awk '$0=="out"{print NR}') 2>/dev/null
 		[ -z "$total_n" ] && total_n="6"
-		[ -n "$2" ] && local tmptotal=$(cat ${dir}/usage.db | sed 's/,,,/,0,0,/g' | sed 's/,,/,0,/g' | sed 's/,/ /g' | grep -i -w ${2} | awk "{print "'$'$total_n"}" | grep -v "^$" | sort -u | head -n1) 2>/dev/null
+		local column_name
+		local selected_n
+		if [ -n "$4" ]; then
+			column_name="$4"
+			case "$column_name" in
+				in) selected_n="$in_n" ;;
+				out) selected_n="$out_n" ;;
+				total|*) selected_n="$total_n" ;;
+			esac
+		else
+			selected_n="$total_n"
+		fi
+		[ -z "$selected_n" ] && selected_n="$total_n"
+		[ -n "$2" ] && local tmptotal=$(cat ${dir}/usage.db | sed 's/,,,/,0,0,/g' | sed 's/,,/,0,/g' | sed 's/,/ /g' | grep -i -E "^${2}[[:space:]]" | awk "{print "'$'$selected_n"}" | grep -v "^$" | sort -u | head -n1) 2>/dev/null
 		[ -z "$tmptotal" ] && local tmptotal="0"
 		[ -z "$3" ] && echo $(bytes_for_humans "${tmptotal}") || echo "$tmptotal"
 	# 剔除
@@ -1806,7 +1873,16 @@ ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${s
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
 ${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}"
 
-			log_change "${disturb_text} $(translate "New device %s %s connected" "$name" "$ip")"
+			# 追加 Wi-Fi 信号强度
+			local up_dbm=$(find_Dbm_final "$mac")
+			[ -n "$up_dbm" ] && content="${content}\
+			${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${up_dbm}"
+
+			if [ -n "$up_dbm" ]; then
+				log_change "${disturb_text} $(translate "New device %s %s connected" "$name" "$ip") dbm：${up_dbm}"
+			else
+				log_change "${disturb_text} $(translate \"New device %s %s connected\" \"$name\" \"$ip\")"
+			fi
 
 			[ -n "$title" ] && echo "$title" >"${dir}/title"
 			[ -n "$content" ] && echo -n "$content" >>"${dir}/content"
@@ -2042,19 +2118,32 @@ get_client_usage() {
 	if [ "$(($(date +%s) - $get_client_usage_time))" -ge "60" ]; then
 		>${dir}/client_usage_aliases
 		for mac in $MACLIST; do
-			echo "$mac" $(usage get ${mac} bytes) >>${dir}/client_usage_aliases
-			[ -f "${dir}/old_client_usage_aliases" ] && get_client_usage_bytes=$(cat ${dir}/old_client_usage_aliases | grep -i -w $mac | awk '{print $2}' | grep -v "^$" | sort -u | head -n1) || continue
-
-			[ -z "$get_client_usage_bytes" ] && get_client_usage_bytes="0"
-			if [ "$(($(usage get ${mac} bytes) - $get_client_usage_bytes))" -ge "$client_usage_max" ]; then
+			# 当前值（total/in/out 原始字节）
+			local cur_total=$(usage get ${mac} bytes total)
+			local cur_in=$(usage get ${mac} bytes in)
+			local cur_out=$(usage get ${mac} bytes out)
+			echo "$mac ${cur_total} ${cur_in} ${cur_out}" >>${dir}/client_usage_aliases
+			# 旧快照
+			[ -f "${dir}/old_client_usage_aliases" ] || continue
+			local old_line=$(grep -i -E "^${mac}[[:space:]]" ${dir}/old_client_usage_aliases | head -n1)
+			[ -z "$old_line" ] && continue
+			local old_nf=$(echo "$old_line" | awk '{print NF}')
+			local prev_total=$(echo "$old_line" | awk '{print $2}')
+			[ -z "$prev_total" ] && prev_total=0
+			local delta_total=$(expr ${cur_total} - ${prev_total})
+			# wrtbwmon 数据重置或计数回绕时，跳过本轮计算（重置基线）
+			[ "$delta_total" -lt 0 ] && continue
+			# 只有在达到阈值时才推送
+			if [ "$delta_total" -ge "$client_usage_max" ]; then
 				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
 				local ip_name=$(getname ${ip} ${mac})
-				local tmp_usage=$(bytes_for_humans $(expr $(usage get ${mac} bytes) - ${get_client_usage_bytes}))
+				local tmp_usage=$(bytes_for_humans ${delta_total})
 				local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
 				local ip_total=$(usage get $mac) && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
 				local time1=$(date +%s)
 				local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
-				
+
+				# 置标题
 				if [ -z "$title" ]; then
 					title=$(translate "%s abnormal traffic" "$name")
 					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
@@ -2065,14 +2154,35 @@ get_client_usage() {
 					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
 				fi
 
+				# 详情
+				local detail_upload=""
+				local detail_download=""
+				if [ "$old_nf" -ge 4 ]; then
+					local prev_in=$(echo "$old_line" | awk '{print $3}')
+					local prev_out=$(echo "$old_line" | awk '{print $4}')
+					[ -z "$prev_in" ] && prev_in=0
+					[ -z "$prev_out" ] && prev_out=0
+					local delta_in=$(expr ${cur_in} - ${prev_in})
+					local delta_out=$(expr ${cur_out} - ${prev_out})
+					[ "$delta_out" -lt 0 ] && delta_out=0
+					[ "$delta_in" -lt 0 ] && delta_in=0
+					detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans ${delta_out})"
+					detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans ${delta_in})"
+				fi
+
+				# Wi-Fi 信号强度（仅无线可用）
+				local detail_dbm=""
+				local wxjk_dbm=$(find_Dbm_final "$mac")
+				[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm}"
+
 				content="\
-${content}\
-${content_title}\
-${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${ip_name}\
-${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
-${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}\
-${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
+			${content}\
+			${content_title}\
+			${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${ip_name}\
+			${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
+			${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
+			${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
+			${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
 			fi
 		done
 		cat ${dir}/client_usage_aliases >${dir}/old_client_usage_aliases
@@ -2632,9 +2742,18 @@ ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${name}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
+		${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
 
-		log_change "${disturb_text} $(translate "Device %s %s disconnected" "$name" "$ip")"
+		# 追加 Wi-Fi 信号强度
+		local down_dbm=$(find_Dbm_final "$mac")
+		[ -n "$down_dbm" ] && content="${content}\
+		${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${down_dbm}"
+
+		if [ -n "$down_dbm" ]; then
+			log_change "${disturb_text} $(translate "Device %s %s disconnected" "$name" "$ip") dbm：${down_dbm}"
+		else
+			log_change "${disturb_text} $(translate \"Device %s %s disconnected\" \"$name\" \"$ip\")"
+		fi
 		
 	done
 	silent_run LockFile lock
